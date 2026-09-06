@@ -137,6 +137,14 @@ class DatabaseBatchRepository implements PrunableBatchRepository
      */
     public function decrementPendingJobs(string $batchId, string $jobId)
     {
+        if ($this->connection instanceof PostgresConnection) {
+            return $this->updateAtomicValuesUsingReturning(
+                $batchId,
+                '"pending_jobs" = "pending_jobs" - 1, "failed_job_ids" = (coalesce("failed_job_ids", \'[]\')::jsonb - ?::text)::text',
+                [$jobId]
+            );
+        }
+
         $values = $this->updateAtomicValues($batchId, function ($batch) use ($jobId) {
             return [
                 'pending_jobs' => $batch->pending_jobs - 1,
@@ -160,6 +168,14 @@ class DatabaseBatchRepository implements PrunableBatchRepository
      */
     public function incrementFailedJobs(string $batchId, string $jobId)
     {
+        if ($this->connection instanceof PostgresConnection) {
+            return $this->updateAtomicValuesUsingReturning(
+                $batchId,
+                '"failed_jobs" = "failed_jobs" + 1, "failed_job_ids" = (case when coalesce("failed_job_ids", \'[]\')::jsonb @> to_jsonb(?::text) then coalesce("failed_job_ids", \'[]\')::jsonb else coalesce("failed_job_ids", \'[]\')::jsonb || to_jsonb(?::text) end)::text',
+                [$jobId, $jobId]
+            );
+        }
+
         $values = $this->updateAtomicValues($batchId, function ($batch) use ($jobId) {
             return [
                 'pending_jobs' => $batch->pending_jobs,
@@ -192,6 +208,29 @@ class DatabaseBatchRepository implements PrunableBatchRepository
                 $this->connection->table($this->table)->where('id', $batchId)->update($values);
             });
         });
+    }
+
+    /**
+     * Update the batch's job counts using a single "returning" statement.
+     *
+     * @param  string  $batchId
+     * @param  string  $columns
+     * @param  array  $bindings
+     * @return \Illuminate\Bus\UpdatedBatchJobCounts
+     */
+    protected function updateAtomicValuesUsingReturning(string $batchId, string $columns, array $bindings)
+    {
+        $table = $this->connection->getQueryGrammar()->wrapTable($this->table);
+
+        $batch = $this->connection->selectFromWriteConnection(
+            "update {$table} set {$columns} where \"id\" = ? returning \"pending_jobs\", \"failed_jobs\"",
+            array_merge($bindings, [$batchId])
+        )[0] ?? null;
+
+        return new UpdatedBatchJobCounts(
+            (int) ($batch->pending_jobs ?? 0),
+            (int) ($batch->failed_jobs ?? 0)
+        );
     }
 
     /**
