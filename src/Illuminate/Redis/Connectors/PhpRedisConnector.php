@@ -214,7 +214,11 @@ class PhpRedisConnector implements Connector
             $parameters[] = $options['password'] ?? null;
         }
 
-        return tap(new RedisCluster(...$parameters), function ($client) use ($options) {
+        $connection = retry(2, fn () => $this->buildClusterConnection($parameters), 0, fn ($e) => Str::contains(
+            $e->getMessage(), 'Connection reset by peer'
+        ));
+
+        return tap($connection, function ($client) use ($options) {
             if (! empty($options['prefix'])) {
                 $client->setOption(Redis::OPT_PREFIX, $options['prefix']);
             }
@@ -259,6 +263,19 @@ class PhpRedisConnector implements Connector
                 $client->setOption(Redis::OPT_BACKOFF_CAP, $options['backoff_cap']);
             }
         });
+    }
+
+    /**
+     * Instantiate the RedisCluster client.
+     *
+     * @param  array  $parameters
+     * @return \RedisCluster
+     *
+     * @throws \RedisClusterException
+     */
+    protected function buildClusterConnection(array $parameters)
+    {
+        return new RedisCluster(...$parameters);
     }
 
     /**

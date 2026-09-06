@@ -2,6 +2,7 @@
 
 namespace Illuminate\Tests\Redis;
 
+use ErrorException;
 use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Redis\Connectors\PhpRedisConnector;
 use InvalidArgumentException;
@@ -302,6 +303,50 @@ class PhpRedisConnectorTest extends TestCase
         $property = new ReflectionProperty(PhpRedisConnection::class, 'connector');
 
         $this->assertIsCallable($property->getValue($connection));
+    }
+
+    public function testConnectToClusterRetriesAfterAConnectionResetAtConnectTime()
+    {
+        $connector = new class extends PhpRedisConnector
+        {
+            public int $attempts = 0;
+
+            protected function buildClusterConnection(array $parameters)
+            {
+                if (++$this->attempts < 2) {
+                    throw new ErrorException('RedisCluster::__construct(): SSL: Connection reset by peer');
+                }
+
+                return new class {
+                };
+            }
+        };
+
+        $connector->connectToCluster([['host' => '127.0.0.1', 'port' => 6379]], [], []);
+
+        $this->assertSame(2, $connector->attempts);
+    }
+
+    public function testConnectToClusterDoesNotRetryUnrelatedConnectErrors()
+    {
+        $connector = new class extends PhpRedisConnector
+        {
+            public int $attempts = 0;
+
+            protected function buildClusterConnection(array $parameters)
+            {
+                $this->attempts++;
+
+                throw new ErrorException("RedisCluster::__construct(): couldn't map cluster keyspace");
+            }
+        };
+
+        try {
+            $connector->connectToCluster([['host' => '127.0.0.1', 'port' => 6379]], [], []);
+            $this->fail('Expected ErrorException was not thrown.');
+        } catch (ErrorException $e) {
+            $this->assertSame(1, $connector->attempts);
+        }
     }
 
     #[RequiresPhpExtension('redis')]
